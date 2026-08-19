@@ -5,6 +5,7 @@ ulimit -c 0
 
 PROFILE=${RX3EMU_PROFILE:-all}
 DURATION=${RX3EMU_DURATION:-60}
+MEDIA=${RX3EMU_MEDIA:-}
 RBP=/rx3/root/pdj/rbp
 OUT=/rx3/tmp/rx3emu
 PDJ=/work/pdj
@@ -25,6 +26,10 @@ printf 'Processor\t: ARMv7 Processor rev 10 (v7l)\nRevision\t: 00000700\n' \
     > /work/rx3-cpuinfo
 mount --bind /work/rx3-cpuinfo /rx3/proc/cpuinfo
 mount --rbind /dev /rx3/dev
+if [ -n "$MEDIA" ]; then
+    mkdir -p /rx3/media/usb1
+    mount --bind "$MEDIA" /rx3/media/usb1
+fi
 
 # rbp and its fixed-path assets live in a private copy. The laboratory sysroot
 # remains mounted read-only on the host.
@@ -82,6 +87,19 @@ rm -f "$OUT/framebuffer.raw" "$OUT/framebuffer.json" \
       "$OUT/ready" "$OUT/status"
 rm -f "$OUT/touch.fifo" "$OUT/touch.command"
 printf '0 0 0\n' > "$OUT/touch.command"
+if [ -n "$MEDIA" ]; then
+    {
+        printf '{"mounted":true,"root":"%s","export_pdb":' "$MEDIA"
+        [ -f "$MEDIA/PIONEER/rekordbox/export.pdb" ] && printf 'true' || printf 'false'
+        printf ',"export_ext_pdb":'
+        [ -f "$MEDIA/PIONEER/rekordbox/exportExt.pdb" ] && printf 'true' || printf 'false'
+        printf ',"pdtl_db":'
+        [ -f "$MEDIA/PIONEER/LIBRARY/PDTL.DB" ] && printf 'true' || printf 'false'
+        printf '}\n'
+    } > "$OUT/media.json"
+else
+    printf '{"mounted":false,"export_pdb":false,"export_ext_pdb":false,"pdtl_db":false}\n' > "$OUT/media.json"
+fi
 rm -f /rx3/tmp/rx3emu-touch.fifo
 mkfifo /rx3/tmp/rx3emu-touch.fifo
 

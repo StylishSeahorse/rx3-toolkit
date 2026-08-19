@@ -100,6 +100,7 @@ def docker_command(
     duration: int,
     container_name: str,
     trace_syscalls: bool = False,
+    media: pathlib.Path | None = None,
 ) -> list[str]:
     command = [
         "docker", "run", "--rm", "--privileged", "--platform", "linux/arm/v7",
@@ -114,6 +115,11 @@ def docker_command(
     ]
     if trace_syscalls:
         command.extend(["--env", "QEMU_STRACE=1"])
+    if media is not None:
+        command.extend([
+            "--mount", f"type=bind,source={media},target=/host-media,readonly",
+            "--env", "RX3EMU_MEDIA=/host-media",
+        ])
     command.append(IMAGE)
     return command
 
@@ -258,6 +264,11 @@ def evaluate(
 ) -> tuple[dict[str, object], bool]:
     hook_log_path = output / "hook.log"
     hook_log = hook_log_path.read_text(errors="replace") if hook_log_path.is_file() else ""
+    media_path = output / "media.json"
+    try:
+        media_info = json.loads(media_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        media_info = {"mounted": False}
     touch_events = hook_log.count("emulator touch control = ")
 
     def counter(label: str) -> int:
@@ -290,6 +301,7 @@ def evaluate(
         "virtual_touch_events": touch_events,
         "framebuffer": framebuffer,
         "audio_buses": audio_buses or [],
+        "media": media_info,
         "scope": {
             "validated": [
                 "rbp ARM startup",
@@ -321,6 +333,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--trace-syscalls", action="store_true",
         help="include QEMU user-mode syscall tracing in rbp.log",
     )
+    parser.add_argument(
+        "--media", type=pathlib.Path,
+        help="mount a Rekordbox-exported USB folder as the firmware's USB1 media",
+    )
     return parser
 
 
@@ -330,6 +346,9 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--duration must be at least 10 seconds")
     sysroot = arguments.sysroot.expanduser().resolve()
     output = (arguments.output or default_output()).expanduser().resolve()
+    media = arguments.media.expanduser().resolve() if arguments.media else None
+    if media is not None and not media.is_dir():
+        raise SystemExit(f"--media must be an existing folder: {media}")
     output.mkdir(parents=True, exist_ok=True)
     try:
         provenance = require_environment(sysroot, arguments.profile)
@@ -338,6 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         command = docker_command(
             sysroot, output, arguments.profile, arguments.duration, container_name,
             arguments.trace_syscalls,
+            media,
         )
         print(f"RX3 emulator output: {output}", flush=True)
         process = subprocess.Popen(command, cwd=REPOSITORY)

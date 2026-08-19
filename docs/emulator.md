@@ -89,6 +89,17 @@ python3 -m tools.rx3_emulator.cli --profile stems --duration 60
 python3 -m tools.rx3_emulator.cli --profile all --duration 60
 ```
 
+To run against a real Rekordbox-exported USB folder, pass its root directory:
+
+```sh
+python3 -m tools.rx3_emulator.cli --profile all --media /path/to/USB --duration 120
+```
+
+The runner presents that folder at the firmware's native `/media/usb1` path
+and writes `media.json` with the detected `PIONEER/rekordbox/export.pdb`,
+`exportExt.pdb`, and `PIONEER/LIBRARY/PDTL.DB` files. This is the bridge for
+the next playback milestone; a plain audio folder is not a Rekordbox library.
+
 Un succès du profil modifié exige un framebuffer non vide, le fichier de
 readiness du hook, le message d'activation, la table d'images privée, des
 compteurs de rendu non nuls et le canal tactile virtuel.
