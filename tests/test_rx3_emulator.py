@@ -5,6 +5,7 @@ import pathlib
 import struct
 import tempfile
 import unittest
+import wave
 
 from tools.rx3_emulator.framebuffer import (
     FramebufferError,
@@ -13,6 +14,7 @@ from tools.rx3_emulator.framebuffer import (
     read_metadata,
 )
 from tools.rx3_emulator.cli import docker_command
+from tools.rx3_emulator.audio import export_wav
 
 
 class FramebufferTests(unittest.TestCase):
@@ -84,6 +86,24 @@ class RunnerTests(unittest.TestCase):
         )
         self.assertIn("rx3-test", command)
         self.assertEqual(command[command.index("--name") + 1], "rx3-test")
+
+    def test_exports_s24_alsa_capture_as_stereo_wav(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            raw = root / "audio-playback-0.raw"
+            metadata = root / "audio-playback-0.json"
+            output = root / "audio-playback-0.wav"
+            raw.write_bytes(b"\x01\x02\x03\x00\x04\x05\x06\x00\x07\x08\x09\x00")
+            metadata.write_text(json.dumps({
+                "rate": 44100, "channels": 3, "format": 6,
+                "sample_bytes": 4, "frames": 1,
+            }))
+            result = export_wav(raw, metadata, output)
+            with wave.open(str(output), "rb") as source:
+                self.assertEqual(source.getnchannels(), 2)
+                self.assertEqual(source.getsampwidth(), 3)
+                self.assertEqual(source.readframes(1), b"\x01\x02\x03\x04\x05\x06")
+            self.assertEqual(result["frames"], 1)
 
 
 if __name__ == "__main__":

@@ -1,30 +1,41 @@
 #!/bin/sh
 # SPDX-License-Identifier: MPL-2.0
 set -eu
+ulimit -c 0
 
 PROFILE=${RX3EMU_PROFILE:-all}
 DURATION=${RX3EMU_DURATION:-60}
 RBP=/rx3/root/pdj/rbp
 OUT=/rx3/tmp/rx3emu
 PDJ=/work/pdj
+GUI=/work/gui
 
 case "$PROFILE" in
     stock|keyshift|stems|all) ;;
     *) echo "unsupported emulator profile: $PROFILE" >&2; exit 64 ;;
 esac
 
-mkdir -p /work "$PDJ" /rx3/tmp "$OUT" /rx3/media/usb/RX3_STEMS
+mkdir -p /work "$PDJ" "$GUI" /rx3/tmp "$OUT" /rx3/media/usb/RX3_STEMS
 mount --bind /output "$OUT"
 mount -t proc proc /rx3/proc
+# JUCE's RX3-specific ALSA backend selects its device table from the board
+# revision in /proc/cpuinfo. QEMU-user exposes the host CPU instead, so provide
+# the same 0x700 identity that the firmware expects on the rev-7 audio board.
+printf 'Processor\t: ARMv7 Processor rev 10 (v7l)\nRevision\t: 00000700\n' \
+    > /work/rx3-cpuinfo
+mount --bind /work/rx3-cpuinfo /rx3/proc/cpuinfo
 mount --rbind /dev /rx3/dev
 
-# rbp and its fixed-path assets live in a 7 MiB private copy. The 4.6 GiB
-# laboratory sysroot remains mounted read-only on the host.
+# rbp and its fixed-path assets live in a private copy. The laboratory sysroot
+# remains mounted read-only on the host.
 cp -a /rx3/root/pdj/. "$PDJ"/
 mount --bind "$PDJ" /rx3/root/pdj
+cp -a /rx3/root/gui/. "$GUI"/
+mount --bind "$GUI" /rx3/root/gui
 cp /opt/rx3emu/fbshim.so /rx3/root/pdj/rx3emu-fbshim.so
+cp /opt/rx3emu/audioshim.so /rx3/root/pdj/rx3emu-audioshim.so
 
-PRELOAD=/root/pdj/rx3emu-fbshim.so
+PRELOAD=/root/pdj/rx3emu-fbshim.so:/root/pdj/rx3emu-audioshim.so
 if [ "$PROFILE" != stock ]; then
     test -r /repo/build/librx3_core_emulator.so
     cp /repo/build/librx3_core_emulator.so /rx3/root/pdj/librx3_core.so
@@ -37,8 +48,6 @@ if [ "$PROFILE" != stock ]; then
     cp /repo/mod/modules/core/1.19/assets/status-none-selected.rgb565 \
        /rx3/root/pdj/rx3-status-none-selected.rgb565
 
-    # NS_GetImageInfoByID: movw r3,#0x15cc -> movw r3,#0x1603. This is the
-    # same guarded pre-launch patch registered by core/module.sh.
     FOUND=$(dd if="$RBP" bs=1 skip=1874220 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')
     case "$FOUND" in
         cc3501e3)
@@ -65,7 +74,12 @@ case "$PROFILE" in
 esac
 
 rm -f "$OUT/framebuffer.raw" "$OUT/framebuffer.json" \
-      "$OUT/rbp.log" "$OUT/hook.log" "$OUT/ready" "$OUT/status"
+      "$OUT/rbp.log" "$OUT/hook.log" "$OUT/hardware.log" \
+      "$OUT/crash.log" "$OUT/audio.log" \
+      "$OUT/audio-playback-0.json" "$OUT/audio-playback-0.raw" \
+      "$OUT/audio-playback-1.json" "$OUT/audio-playback-1.raw" \
+      "$OUT/audio-playback-2.json" "$OUT/audio-playback-2.raw" \
+      "$OUT/ready" "$OUT/status"
 rm -f "$OUT/touch.fifo" "$OUT/touch.command"
 printf '0 0 0\n' > "$OUT/touch.command"
 rm -f /rx3/tmp/rx3emu-touch.fifo
@@ -96,11 +110,13 @@ mkfifo /rx3/tmp/stdin.fifo 2>/dev/null || true
 STDIN_WRITER_PID=$!
 
 chroot /rx3 /bin/sh -c \
-    "LD_PRELOAD='$PRELOAD' RX3_KEYSHIFT='$KEYSHIFT' RX3_STEMS_DIR='$STEMS' \
+    "cd /root/pdj && \
+     LD_PRELOAD='$PRELOAD' RX3_KEYSHIFT='$KEYSHIFT' RX3_STEMS_DIR='$STEMS' \
      RX3_EMULATOR_PANEL='$PANEL' \
+     RX3_EMULATOR_AUDIO='1' \
      RX3EMU_OUTPUT=/tmp/rx3emu \
      DFBARGS='system=fbdev,no-vt,no-sighandler,no-cursor,no-hardware,disable-module=keyboard,disable-module=linux_input,disable-module=gal,mode=1280x720,depth=32' \
-     /root/pdj/rbp -a < /tmp/stdin.fifo" > "$OUT/rbp.log" 2>&1 &
+     ./rbp -a < /tmp/stdin.fifo" > "$OUT/rbp.log" 2>&1 &
 RBP_PID=$!
 
 echo "running profile=$PROFILE pid=$RBP_PID duration=${DURATION}s"

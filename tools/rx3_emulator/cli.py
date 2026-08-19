@@ -14,6 +14,7 @@ import sys
 import time
 
 from tools.rx3_emulator.framebuffer import FramebufferError, export_png
+from tools.rx3_emulator.audio import export_audio_buses
 
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[2]
@@ -55,11 +56,16 @@ def require_environment(sysroot: pathlib.Path, profile: str) -> dict[str, str]:
         raise RuntimeError(f"unsupported rbp SHA-1: {rbp_sha1}")
     result = {"rbp_sha1": rbp_sha1}
     if profile != "stock":
-        subprocess.run(["make", "emulator-hook"], cwd=REPOSITORY, check=True)
         core = REPOSITORY / "build/librx3_core.so"
         emulator_core = REPOSITORY / "build/librx3_core_emulator.so"
+        make = shutil.which("make")
+        if make:
+            subprocess.run([make, "emulator-hook"], cwd=REPOSITORY, check=True)
         if not core.is_file() or not emulator_core.is_file():
-            raise RuntimeError("make emulator-hook did not produce both hook variants")
+            hint = "run `make emulator-hook`"
+            if not make:
+                hint += " (or supply both prebuilt ARM hook variants in build/)"
+            raise RuntimeError(f"missing emulator hooks; {hint}")
         result["core_sha256"] = digest(core, "sha256")
         result["emulator_core_sha256"] = digest(emulator_core, "sha256")
     return result
@@ -93,8 +99,9 @@ def docker_command(
     profile: str,
     duration: int,
     container_name: str,
+    trace_syscalls: bool = False,
 ) -> list[str]:
-    return [
+    command = [
         "docker", "run", "--rm", "--privileged", "--platform", "linux/arm/v7",
         "--name", container_name,
         "--mount", f"type=bind,source={sysroot},target=/rx3,readonly",
@@ -104,8 +111,11 @@ def docker_command(
         "--tmpfs", "/rx3/media:rw,exec,mode=755",
         "--env", f"RX3EMU_PROFILE={profile}",
         "--env", f"RX3EMU_DURATION={duration}",
-        IMAGE,
     ]
+    if trace_syscalls:
+        command.extend(["--env", "QEMU_STRACE=1"])
+    command.append(IMAGE)
+    return command
 
 
 def convert_when_ready(output: pathlib.Path) -> dict[str, int | str] | None:
@@ -244,6 +254,7 @@ def evaluate(
     provenance: dict[str, str],
     framebuffer: dict[str, int | str] | None,
     container_status: int,
+    audio_buses: list[dict[str, object]] | None = None,
 ) -> tuple[dict[str, object], bool]:
     hook_log_path = output / "hook.log"
     hook_log = hook_log_path.read_text(errors="replace") if hook_log_path.is_file() else ""
@@ -269,6 +280,8 @@ def evaluate(
             or counter("probe custom PAD draws") > 0
         ),
         "virtual_touch_ready": profile == "stock" or "emulator virtual touch channel ready" in hook_log,
+        "native_audio_started": profile == "stock" or "probe audio-start calls = 1" in hook_log,
+        "pcm_audio_exported": profile == "stock" or bool(audio_buses),
     }
     report: dict[str, object] = {
         "profile": profile,
@@ -276,6 +289,7 @@ def evaluate(
         "checks": checks,
         "virtual_touch_events": touch_events,
         "framebuffer": framebuffer,
+        "audio_buses": audio_buses or [],
         "scope": {
             "validated": [
                 "rbp ARM startup",
@@ -284,7 +298,7 @@ def evaluate(
                 "native UI draw path",
                 *(["virtual touch routing"] if touch_events else []),
             ],
-            "not_validated": ["audio DSP", "hardware LEDs", "USB timing", "device stability"],
+            "not_validated": ["loaded-track audio", "hardware LEDs", "USB timing", "device stability"],
         },
     }
     (output / "report.json").write_text(
@@ -303,6 +317,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration", type=int, default=60)
     parser.add_argument("--window", action="store_true", help="show a live clickable 1280x720 screen")
     parser.add_argument("--rebuild-image", action="store_true")
+    parser.add_argument(
+        "--trace-syscalls", action="store_true",
+        help="include QEMU user-mode syscall tracing in rbp.log",
+    )
     return parser
 
 
@@ -318,7 +336,8 @@ def main(argv: list[str] | None = None) -> int:
         ensure_image(arguments.rebuild_image)
         container_name = f"rx3-toolbox-emulator-{os.getpid()}"
         command = docker_command(
-            sysroot, output, arguments.profile, arguments.duration, container_name
+            sysroot, output, arguments.profile, arguments.duration, container_name,
+            arguments.trace_syscalls,
         )
         print(f"RX3 emulator output: {output}", flush=True)
         process = subprocess.Popen(command, cwd=REPOSITORY)
@@ -332,8 +351,10 @@ def main(argv: list[str] | None = None) -> int:
             process.terminate()
             process.wait(timeout=15)
             return 130
+        audio_buses = export_audio_buses(output)
         report, passed = evaluate(
-            output, arguments.profile, provenance, framebuffer, process.returncode or 0
+            output, arguments.profile, provenance, framebuffer,
+            process.returncode or 0, audio_buses,
         )
     except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
         print(f"emulator error: {error}", file=sys.stderr)

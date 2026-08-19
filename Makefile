@@ -28,7 +28,7 @@ LDFLAGS := -fuse-ld=lld -shared -nostdlib \
 
 .DEFAULT_GOAL := help
 
-.PHONY: help hook emulator-hook autoexec app test emulator-image emulate emulate-system emulate-system-fast emulate-system-window preflight clean
+.PHONY: help hook emulator-hook autoexec app test emulator-image emulate emulate-native emulate-system emulate-system-fast emulate-system-window preflight clean
 
 help:
 	@printf '%s\n' \
@@ -40,6 +40,7 @@ help:
 	  'make test                         run source tests' \
 	  'make emulator-image               build the ARM emulator container' \
 	  'make emulate                      run rbp with all mods and export its framebuffer' \
+	  'make emulate-native               run the host-native behavioral emulator (no firmware required)' \
 	  'make emulate-system               boot the genuine U-Boot and RX3 kernel in QEMU' \
 	  'make emulate-system-fast          boot the kernel, RX3 init, apl_start and rbp' \
 	  'make emulate-system-window        show the framebuffer from the full system VM' \
@@ -82,6 +83,9 @@ emulator-image:
 emulate: emulator-hook
 	$(PYTHON) -m tools.rx3_emulator.cli --profile "$${PROFILE:-all}" \
 	  --duration "$${DURATION:-300}" --window
+
+emulate-native:
+	$(PYTHON) -m tools.rx3_native_emulator.cli
 
 emulate-system:
 	$(PYTHON) -m tools.rx3_system_emulator.cli --mode "$${MODE:-all}" \

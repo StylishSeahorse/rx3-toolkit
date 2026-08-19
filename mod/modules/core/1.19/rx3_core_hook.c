@@ -48,6 +48,9 @@
 #define TOUCH_XPAD_HOLD  ((unsigned long)0x00360e5c)
 #define TOUCH_BUTTON_OFF ((unsigned long)0x00363280)
 #define AUDIO_START    ((unsigned long)0x000447b8)
+#define DJ_ENGINE_GET_INSTANCE ((unsigned long)0x00028408)
+#define DJ_ENGINE_INITIALIZE_AUDIO ((unsigned long)0x00044c24)
+#define GET_CPU_REVISION ((unsigned long)0x003c30c8)
 /* dsp::TimeStretch::getStreamAt is the deck's playback stream. It wraps
    PcmReader::getStreamAt and is the speed and master-tempo stage, so its output
    is what the deck actually plays. PcmReader::getStreamAt itself is shared with
@@ -124,6 +127,7 @@ extern off_t    lseek(int, off_t, int);
 extern void    *mmap(void *, size_t, int, int, int, off_t);
 extern int      munmap(void *, size_t);
 extern int      mprotect(void *, size_t, int);
+extern int      mincore(void *, size_t, unsigned char *);
 extern long     sysconf(int);
 extern void    *memcpy(void *, const void *, size_t);
 extern void    *memset(void *, int, size_t);
@@ -177,6 +181,8 @@ typedef void (*touch_area_hold_fn)(void *, unsigned int, unsigned int);
 typedef void (*audio_start_fn)(void *, void *);
 typedef int (*audio_buffer_size_fn)(void *);
 typedef double (*audio_sample_rate_fn)(void *);
+typedef void *(*dj_engine_get_instance_fn)(void);
+typedef void (*dj_engine_initialize_audio_fn)(void *, int);
 typedef void (*render_cur_pos_fn)(int *, int *);
 typedef void (*set_beatfx_selected_fn)(int);
 typedef int (*get_beatfx_selected_fn)(void);
@@ -240,6 +246,11 @@ static const uint8_t touch_xpad_hold_guard[8] = {
 static const uint8_t audio_start_guard[8] = {
     0x00, 0x30, 0x91, 0xe5, 0xf0, 0x47, 0x2d, 0xe9
 };
+#if defined(RX3_EMULATOR_BUILD)
+static const uint8_t cpu_revision_guard[8] = {
+    0x30, 0x40, 0x2d, 0xe9, 0x0c, 0xd0, 0x4d, 0xe2
+};
+#endif
 static const uint8_t set_beatfx_guard[8] = {
     0x98, 0x33, 0x0b, 0xe3, 0x16, 0x32, 0x40, 0xe3
 };
@@ -296,6 +307,7 @@ static volatile unsigned int beatfx_reselect_pending;
 /* Host-only state. The deployable hook is compiled without this branch. */
 static volatile unsigned int emulator_forced_panel;
 static volatile unsigned int emulator_panel_applied;
+static volatile unsigned int emulator_audio_applied;
 static unsigned int emulator_touch_sequence;
 #endif
 
@@ -304,6 +316,8 @@ static int deck_index_for_reader(const void *reader);
 #if defined(RX3_EMULATOR_BUILD)
 static void emulator_poll_touch(void);
 static void emulator_activate_initial_panel(void);
+static void emulator_activate_audio(void);
+static int emulator_get_cpu_revision(void);
 #endif
 
 static int stems_feature_configured(void);
@@ -367,6 +381,9 @@ static struct installed_hook touch_xpad_on_hook;
 static struct installed_hook touch_xpad_off_hook;
 static struct installed_hook touch_xpad_hold_hook;
 static struct installed_hook audio_start_hook;
+#if defined(RX3_EMULATOR_BUILD)
+static struct installed_hook cpu_revision_hook;
+#endif
 static struct installed_hook timestretch_operate_hook;
 static struct installed_hook timestretch_fgpr_hook;
 static struct installed_hook set_beatfx_hook;
@@ -488,6 +505,36 @@ static int read_exactly(int fd, void *destination, size_t length);
 
 static uint8_t tab_image_pixels[TAB_IMAGE_COUNT][TAB_IMAGE_BYTES];
 
+static int address_is_mapped(unsigned long address)
+{
+    long page_size = sysconf(_SC_PAGESIZE);
+    unsigned char residency;
+    if (page_size <= 0)
+        return 0;
+    unsigned long page = address & ~((unsigned long)page_size - 1u);
+    return mincore((void *)page, (size_t)page_size, &residency) == 0;
+}
+
+static int address_range_is_mapped(const void *address, size_t length)
+{
+    unsigned long first = (unsigned long)address;
+    if (!address || !length || first + length < first)
+        return 0;
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0)
+        return 0;
+    unsigned long mask = (unsigned long)page_size - 1u;
+    unsigned long page = first & ~mask;
+    unsigned long last = (first + length - 1u) & ~mask;
+    for (;;) {
+        if (!address_is_mapped(page))
+            return 0;
+        if (page == last)
+            return 1;
+        page += (unsigned long)page_size;
+    }
+}
+
 static void install_tab_assets(void)
 {
     if (tab_assets_ready)
@@ -514,8 +561,14 @@ static void install_tab_assets(void)
         close(fd);
     }
 
+    /* rbp maps this late in startup. On a slow emulated CPU the watcher can
+       otherwise dereference the fixed slot before its owning mapping exists. */
+    if (!address_is_mapped(IMAGE_TABLE_POINTER)) {
+        tab_assets_installing = 0u;
+        return;
+    }
     uint8_t *stock_table = *(uint8_t **)IMAGE_TABLE_POINTER;
-    if (!stock_table) {
+    if (!address_range_is_mapped(stock_table, STOCK_IMAGE_COUNT * 44u)) {
         tab_assets_installing = 0u;
         return;
     }
@@ -580,10 +633,13 @@ static void *watch_patch_state(void *unused)
     int last_phase = -1;
     while (state_thread_running) {
         usleep(50000u);
+#if !defined(RX3_EMULATOR_BUILD)
         if (!tab_assets_ready)
             install_tab_assets();
+#endif
 #if defined(RX3_EMULATOR_BUILD)
         emulator_activate_initial_panel();
+        emulator_activate_audio();
 #endif
         /* Nothing else invalidates the pad windows while a sidecar is read, so
            the blink has to ask for the redraw that carries its own parity. */
@@ -1770,6 +1826,35 @@ static void emulator_activate_initial_panel(void)
                emulator_forced_panel);
 }
 
+static void emulator_activate_audio(void)
+{
+    if (emulator_audio_applied)
+        return;
+    const char *enabled = getenv("RX3_EMULATOR_AUDIO");
+    if (!enabled || enabled[0] != '1')
+        return;
+
+    /* The physical RX3 starts JUCE after its panel/audio controller handshake.
+       The PC emulator has no such controller, so perform the same public
+       DjEngineIF initialization after the guarded hook has initialized. */
+    dj_engine_get_instance_fn get_instance =
+        (dj_engine_get_instance_fn)DJ_ENGINE_GET_INSTANCE;
+    dj_engine_initialize_audio_fn initialize_audio =
+        (dj_engine_initialize_audio_fn)DJ_ENGINE_INITIALIZE_AUDIO;
+    void *engine = get_instance();
+    if (!engine)
+        return;
+    emulator_audio_applied = 1u;
+    log_line("emulator starting native audio device");
+    initialize_audio(engine, 0);
+    log_line("emulator native audio initialization returned");
+}
+
+static int emulator_get_cpu_revision(void)
+{
+    return 0x700;
+}
+
 static void *emulator_touch_loop(void *unused)
 {
     (void)unused;
@@ -2163,6 +2248,12 @@ __attribute__((constructor)) static void initialize(void)
         goto reject_performance_hooks;
 
 #if defined(RX3_EMULATOR_BUILD)
+    if (!install_hook(&cpu_revision_hook, GET_CPU_REVISION,
+                      cpu_revision_guard,
+                      (void *)emulator_get_cpu_revision)) {
+        log_line("rejected: unexpected CPU revision query prologue");
+        goto reject_performance_hooks;
+    }
     /* The host has no front-panel microcontroller to request the first native
        transition. Force one configured panel so the real rendering branches
        are observable and clickable. */
@@ -2195,6 +2286,9 @@ __attribute__((constructor)) static void initialize(void)
     return;
 
 reject_performance_hooks:
+#if defined(RX3_EMULATOR_BUILD)
+    uninstall_hook(&cpu_revision_hook);
+#endif
     configure_native_performance_touches(0);
     remove_features();
     uninstall_hook(&touch_xpad_hold_hook);
@@ -2238,6 +2332,9 @@ reject_performance_hooks:
 __attribute__((destructor)) static void finalize(void)
 {
     state_thread_running = 0;
+#if defined(RX3_EMULATOR_BUILD)
+    uninstall_hook(&cpu_revision_hook);
+#endif
     configure_native_performance_touches(0);
     remove_features();
     uninstall_hook(&touch_xpad_hold_hook);

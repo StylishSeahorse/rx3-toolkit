@@ -1,5 +1,20 @@
 # Émulateur minimal RX3 1.19 avec écran tactile virtuel
 
+## Mode PC sans firmware privé
+
+Pour travailler sur l'interface et les comportements des modules sans Docker,
+QEMU ou les artefacts propriétaires, lancez :
+
+```sh
+make emulate-native
+```
+
+Ce mode est un modèle comportemental natif : deux decks, transport, grille de
+beat-jump, key shift et toggles STEMS sont interactifs sur une fenêtre de PC.
+Il n'exécute pas le binaire Pioneer et ne produit pas d'audio. Les tests de
+firmware restent dans `make emulate`, qui exécute le véritable ARM `rbp` quand
+le sysroot privé 1.19 est disponible.
+
 Cet outil exécute le véritable binaire ARM `rbp` et les bibliothèques du
 firmware 1.19 dans Docker/QEMU. Un shim remplace `fbdev` et les périphériques
 indispensables au démarrage, puis exporte le framebuffer DirectFB en PNG. La
@@ -29,8 +44,9 @@ du boot système, et réciproquement.
 
 Le premier niveau ne simule pas un RX3 complet. Il valide le chargement ELF,
 les gardes des hooks, le démarrage de `rbp`, le chemin de rendu natif et le
-routage tactile des mods. Il ne valide pas le DSP audio, les LEDs, les
-microcontrôleurs de façade, les accès USB réels ni la stabilité sur appareil.
+routage tactile des mods et le démarrage des bus PCM. Il ne valide pas encore
+le DSP d'un morceau chargé, les LEDs, les microcontrôleurs de façade, les accès
+USB réels ni la stabilité sur appareil.
 Les contrôles stock hors du panneau Performance ne sont pas encore routés :
 l'initialisation du vrai `TouchPanel` reste bloquée par des périphériques
 absents sous QEMU.
@@ -43,7 +59,10 @@ absents sous QEMU.
 
 Le firmware, `rbp` et les ressources propriétaires restent dans `local/` et ne
 sont jamais ajoutés au dépôt. Le sysroot est monté en lecture seule. Le runner
-copie seulement `/root/pdj` dans le conteneur avant d'appliquer le patch requis.
+copie `/root/pdj` et met en cache `/root/gui` dans le conteneur avant
+d'appliquer le patch requis. Cette copie locale des ressources GUI évite que
+les lectures de `imagedata.dat` soient limitées par le partage de fichiers
+Windows de Docker Desktop.
 
 ## Utilisation
 
@@ -56,6 +75,8 @@ La commande teste le profil `all` pendant 60 secondes. Les résultats sont dans
 Échap ou `q` ferme la session. Les artefacts comprennent :
 
 - `framebuffer.png` : dernière image 1280×720 ;
+- `audio-playback-0.wav` à `audio-playback-2.wav` : les trois bus de sortie
+  natifs, convertis en WAV stéréo 24 bits à 44,1 kHz ;
 - `rbp.log` et `hook.log` : journaux séparés ;
 - `report.json` : empreintes des binaires, assertions et périmètre de preuve.
 
@@ -71,6 +92,22 @@ python3 -m tools.rx3_emulator.cli --profile all --duration 60
 Un succès du profil modifié exige un framebuffer non vide, le fichier de
 readiness du hook, le message d'activation, la table d'images privée, des
 compteurs de rendu non nuls et le canal tactile virtuel.
+
+Le profil `all` 1.19 a été validé sur PC avec le véritable écran rekordbox
+1280×720. Les onglets KEY/STEMS et leurs contrôles sont dessinés par le chemin
+DirectFB natif ; un clic STEMS puis un clic de contrôle produisent un redraw et
+les événements correspondants dans `hook.log`. Prévoyez environ quatre minutes
+pour une première exécution sous QEMU sur Docker Desktop : l'installation des
+hooks ARM et le chargement des ressources sont volontairement privilégiés à la
+vitesse de démarrage.
+
+Le backend audio PC présente aussi au firmware l'identité de carte rev-7 et
+les noms ALSA qu'il attend. L'initialisation passe par le véritable singleton
+`DjEngineIF`, déclenche `audioDeviceAboutToStart` et cadence les trois bus PCM.
+Les captures WAV prouvent le moteur et le routage audio ; le chargement d'un
+morceau reste séparé, car `StTrackInfo` contient des métadonnées issues de la
+base Rekordbox qui ne peuvent pas être remplacées par un simple chemin de
+fichier.
 
 Deux ELF sont compilés. `librx3_core.so` reste le livrable de production.
 `librx3_core_emulator.so` ajoute uniquement, sous `RX3_EMULATOR_BUILD`, le

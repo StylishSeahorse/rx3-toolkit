@@ -5,6 +5,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <linux/fb.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -14,10 +15,15 @@
 #include <sys/mman.h>
 #include <sys/select.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <ucontext.h>
 
 #define MAX_TRACKED_FDS 64
+#define IMX6_GPT_BASE 0x02098000u
+#define IMX6_GPT_COUNTER_WORD (0x24u / sizeof(uint32_t))
+#define IMX6_GPT_TICKS_PER_US 3u
 
 struct fake_device {
     const char *path;
@@ -49,9 +55,15 @@ static int (*real_open)(const char *, int, ...);
 static int (*real_open64)(const char *, int, ...);
 static int (*real_ioctl)(int, unsigned long, ...);
 static int (*real_select)(int, fd_set *, fd_set *, fd_set *, struct timeval *);
+static ssize_t (*real_read)(int, void *, size_t);
 static ssize_t (*real_write)(int, const void *, size_t);
 static void *(*real_mmap)(void *, size_t, int, int, int, off_t);
 static void *(*real_mmap64)(void *, size_t, int, int, int, off64_t);
+typedef unsigned long rx3emu_pthread_t;
+static int (*real_pthread_create)(rx3emu_pthread_t *, const void *,
+                                  void *(*)(void *), void *);
+static int (*real_pthread_detach)(rx3emu_pthread_t);
+static int (*real_sigaction)(int, const struct sigaction *, struct sigaction *);
 
 static int width = 1280;
 static int height = 720;
@@ -62,13 +74,20 @@ static char output_directory[256] = "/tmp/rx3emu";
 static int framebuffer_fds[MAX_TRACKED_FDS];
 static int framebuffer_count;
 static int fake_fds[MAX_TRACKED_FDS];
+static const char *fake_fd_paths[MAX_TRACKED_FDS];
 static int fake_count;
+static unsigned int hardware_ioctl_logs;
+static int gpt_fds[MAX_TRACKED_FDS];
+static int gpt_count;
+static volatile uint32_t *gpt_registers;
+static int gpt_started;
 static void *framebuffer_address;
 static size_t framebuffer_mapping_size;
 static int exporter_started;
 static pid_t exporter_pid = -1;
 static int semihosting_enabled;
 static int semihosting_handle = -1;
+static int crash_handler_installed;
 
 #define SEMI_SYS_OPEN 0x01
 #define SEMI_SYS_CLOSE 0x02
@@ -198,15 +217,20 @@ static void *semihosting_exporter(void *unused)
 static void initialize(void)
 {
     const char *configured;
+    struct sigaction action;
     if (real_ioctl)
         return;
     real_open = dlsym(RTLD_NEXT, "open");
     real_open64 = dlsym(RTLD_NEXT, "open64");
     real_ioctl = dlsym(RTLD_NEXT, "ioctl");
     real_select = dlsym(RTLD_NEXT, "select");
+    real_read = dlsym(RTLD_NEXT, "read");
     real_write = dlsym(RTLD_NEXT, "write");
     real_mmap = dlsym(RTLD_NEXT, "mmap");
     real_mmap64 = dlsym(RTLD_NEXT, "mmap64");
+    real_pthread_create = dlsym(RTLD_NEXT, "pthread_create");
+    real_pthread_detach = dlsym(RTLD_NEXT, "pthread_detach");
+    real_sigaction = dlsym(RTLD_NEXT, "sigaction");
     configured = getenv("RX3EMU_OUTPUT");
     if (configured && configured[0]) {
         strncpy(output_directory, configured, sizeof(output_directory) - 1);
@@ -214,6 +238,45 @@ static void initialize(void)
     }
     configured = getenv("RX3EMU_SEMIHOSTING");
     semihosting_enabled = configured && !strcmp(configured, "1");
+    if (!crash_handler_installed && real_sigaction) {
+        extern void rx3emu_crash_handler(int, siginfo_t *, void *);
+        memset(&action, 0, sizeof(action));
+        action.sa_sigaction = rx3emu_crash_handler;
+        action.sa_flags = SA_SIGINFO | SA_RESETHAND;
+        sigemptyset(&action.sa_mask);
+        if (!real_sigaction(SIGSEGV, &action, NULL) &&
+            !real_sigaction(SIGBUS, &action, NULL))
+            crash_handler_installed = 1;
+    }
+}
+
+void rx3emu_crash_handler(int signal_number, siginfo_t *information, void *context)
+{
+    char path[320];
+    char payload[256];
+    int descriptor;
+    int length;
+    unsigned long pc = 0;
+    unsigned long lr = 0;
+    unsigned long sp = 0;
+#if defined(__arm__)
+    ucontext_t *machine = (ucontext_t *)context;
+    pc = (unsigned long)machine->uc_mcontext.arm_pc;
+    lr = (unsigned long)machine->uc_mcontext.arm_lr;
+    sp = (unsigned long)machine->uc_mcontext.arm_sp;
+#else
+    (void)context;
+#endif
+    snprintf(path, sizeof(path), "%s/crash.log", output_directory);
+    descriptor = real_open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (descriptor >= 0) {
+        length = snprintf(payload, sizeof(payload),
+            "signal=%d address=%p pc=0x%08lx lr=0x%08lx sp=0x%08lx\n",
+            signal_number, information ? information->si_addr : NULL, pc, lr, sp);
+        real_write(descriptor, payload, (size_t)length);
+        close(descriptor);
+    }
+    _exit(128 + signal_number);
 }
 
 static int tracked(const int *fds, int count, int fd)
@@ -231,9 +294,87 @@ static void remember(int *fds, int *count, int fd)
         fds[(*count)++] = fd;
 }
 
+static void remember_fake(int fd, const char *path)
+{
+    if (fd >= 0 && fake_count < MAX_TRACKED_FDS) {
+        fake_fds[fake_count] = fd;
+        fake_fd_paths[fake_count] = path;
+        fake_count++;
+    }
+}
+
+static const char *fake_path(int fd)
+{
+    int index;
+    for (index = fake_count - 1; index >= 0; index--)
+        if (fake_fds[index] == fd)
+            return fake_fd_paths[index];
+    return "fake-device";
+}
+
+static void log_hardware(const char *operation, const char *path, long value)
+{
+    char log_path[320];
+    char payload[448];
+    int descriptor;
+    int length;
+    if (!real_open || !real_write)
+        return;
+    snprintf(log_path, sizeof(log_path), "%s/hardware.log", output_directory);
+    descriptor = real_open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (descriptor < 0)
+        return;
+    length = snprintf(payload, sizeof(payload), "%s %s %ld\n",
+                      operation, path ? path : "-", value);
+    real_write(descriptor, payload, (size_t)length);
+    close(descriptor);
+}
+
+static void *run_gpt_counter(void *unused)
+{
+    struct timeval now;
+    uint64_t origin_us;
+    (void)unused;
+    gettimeofday(&now, NULL);
+    origin_us = (uint64_t)now.tv_sec * 1000000u +
+                (uint64_t)now.tv_usec;
+    for (;;) {
+        uint64_t current_us;
+        gettimeofday(&now, NULL);
+        current_us = (uint64_t)now.tv_sec * 1000000u +
+                     (uint64_t)now.tv_usec;
+        if (gpt_registers)
+            gpt_registers[IMX6_GPT_COUNTER_WORD] =
+                (uint32_t)((current_us - origin_us) * IMX6_GPT_TICKS_PER_US);
+        usleep(100);
+    }
+    return NULL;
+}
+
+static void start_gpt_counter(void *mapping)
+{
+    rx3emu_pthread_t thread;
+    gpt_registers = (volatile uint32_t *)mapping;
+    if (!gpt_started && real_pthread_create && real_pthread_detach &&
+        !real_pthread_create(&thread, NULL, run_gpt_counter, NULL)) {
+        real_pthread_detach(thread);
+        gpt_started = 1;
+        log_hardware("gpt-start", "/dev/mem", 3000000);
+    }
+}
+
 static size_t framebuffer_size(void)
 {
     return (size_t)width * (size_t)virtual_height * (size_t)(bpp / 8);
+}
+
+static void ensure_framebuffer_capacity(int descriptor)
+{
+    off_t current = lseek(descriptor, 0, SEEK_END);
+    off_t required = (off_t)framebuffer_size();
+    if (current < required)
+        ftruncate(descriptor, required);
+    lseek(descriptor, 0, SEEK_SET);
 }
 
 static void write_metadata(void)
@@ -261,7 +402,7 @@ static int open_framebuffer(void)
     snprintf(path, sizeof(path), "%s/framebuffer.raw", output_directory);
     descriptor = real_open(path, O_RDWR | O_CREAT, 0644);
     if (descriptor >= 0) {
-        ftruncate(descriptor, (off_t)framebuffer_size());
+        ensure_framebuffer_capacity(descriptor);
         remember(framebuffer_fds, &framebuffer_count, descriptor);
         write_metadata();
     }
@@ -302,7 +443,17 @@ void *mmap(void *address, size_t length, int protection, int flags,
 {
     void *mapped;
     initialize();
-    mapped = real_mmap(address, length, protection, flags, descriptor, offset);
+    if (tracked(gpt_fds, gpt_count, descriptor) &&
+        (unsigned long)offset == IMX6_GPT_BASE && length >= 0x28u) {
+        mapped = real_mmap(address, length, protection | PROT_WRITE,
+                           (flags & MAP_FIXED) | MAP_PRIVATE | MAP_ANONYMOUS,
+                           -1, 0);
+        if (mapped != MAP_FAILED)
+            start_gpt_counter(mapped);
+        log_hardware("gpt-mmap", "/dev/mem", (long)offset);
+    } else {
+        mapped = real_mmap(address, length, protection, flags, descriptor, offset);
+    }
     remember_framebuffer_mapping(descriptor, mapped, length);
     return mapped;
 }
@@ -350,22 +501,39 @@ static int open_fake(const struct fake_device *device)
             lseek(descriptor, 0, SEEK_SET);
         }
     }
-    remember(fake_fds, &fake_count, descriptor);
+    remember_fake(descriptor, device->path);
     return descriptor;
 }
 
 static int redirected_open(const char *path, int flags, mode_t mode, int use_open64)
 {
     const struct fake_device *device;
+    int descriptor;
     initialize();
-    if (path && !strcmp(path, "/dev/fb0"))
-        return open_framebuffer();
+    if (path && !strcmp(path, "/dev/fb0")) {
+        descriptor = open_framebuffer();
+        log_hardware("open-fb", path, descriptor);
+        return descriptor;
+    }
+    if (path && !strcmp(path, "/dev/mem")) {
+        descriptor = real_open(path, flags, mode);
+        remember(gpt_fds, &gpt_count, descriptor);
+        log_hardware("open-gpt", path, descriptor);
+        return descriptor;
+    }
     device = find_fake(path);
-    if (device)
-        return open_fake(device);
-    if (use_open64 && real_open64)
-        return real_open64(path, flags, mode);
-    return real_open(path, flags, mode);
+    if (device) {
+        descriptor = open_fake(device);
+        log_hardware("open-fake", path, descriptor);
+        return descriptor;
+    }
+    descriptor = use_open64 && real_open64
+        ? real_open64(path, flags, mode) : real_open(path, flags, mode);
+    if (path && (!strncmp(path, "/dev/", 5) ||
+                 !strncmp(path, "/proc/", 6) ||
+                 !strncmp(path, "/sys/", 5)))
+        log_hardware("open-pass", path, descriptor);
+    return descriptor;
 }
 
 int open(const char *path, int flags, ...)
@@ -390,6 +558,32 @@ int open64(const char *path, int flags, ...)
         va_end(arguments);
     }
     return redirected_open(path, flags, mode, 1);
+}
+
+ssize_t read(int descriptor, void *buffer, size_t length)
+{
+    ssize_t result;
+    initialize();
+    result = real_read(descriptor, buffer, length);
+    if (tracked(fake_fds, fake_count, descriptor) &&
+        hardware_ioctl_logs++ < 512u) {
+        log_hardware("read-size", fake_path(descriptor), (long)length);
+        log_hardware("read-result", fake_path(descriptor), (long)result);
+    }
+    return result;
+}
+
+ssize_t write(int descriptor, const void *buffer, size_t length)
+{
+    ssize_t result;
+    initialize();
+    result = real_write(descriptor, buffer, length);
+    if (tracked(fake_fds, fake_count, descriptor) &&
+        hardware_ioctl_logs++ < 512u) {
+        log_hardware("write-size", fake_path(descriptor), (long)length);
+        log_hardware("write-result", fake_path(descriptor), (long)result);
+    }
+    return result;
 }
 
 static void fill_variable(struct fb_var_screeninfo *value)
@@ -435,8 +629,11 @@ int ioctl(int descriptor, unsigned long request, ...)
     va_start(arguments, request);
     argument = va_arg(arguments, void *);
     va_end(arguments);
-    if (tracked(fake_fds, fake_count, descriptor))
+    if (tracked(fake_fds, fake_count, descriptor)) {
+        if (hardware_ioctl_logs++ < 512u)
+            log_hardware("ioctl-fake", fake_path(descriptor), (long)request);
         return 0;
+    }
     if (!tracked(framebuffer_fds, framebuffer_count, descriptor))
         return real_ioctl(descriptor, request, argument);
     switch (request) {
@@ -452,7 +649,9 @@ int ioctl(int descriptor, unsigned long request, ...)
                 ? (int)requested->yres_virtual : height;
             bpp = (int)requested->bits_per_pixel;
             yoffset = 0;
-            ftruncate(descriptor, (off_t)framebuffer_size());
+            /* DirectFB keeps the first mapping alive while negotiating its
+               final 16-bit mode. Never shrink storage beneath that mapping. */
+            ensure_framebuffer_capacity(descriptor);
             write_metadata();
         }
         fill_variable(argument);
@@ -486,6 +685,14 @@ int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
 {
     int result;
     initialize();
+    /* The RX3 debug-console task passes 2,000,000 in tv_usec.  The vendor
+       kernel accepted this as two seconds, while current Linux (and qemu-user)
+       rejects it with EINVAL.  Normalize oversized microseconds so the task
+       blocks as intended instead of consuming a core in an error loop. */
+    if (timeout && timeout->tv_usec >= 1000000) {
+        timeout->tv_sec += timeout->tv_usec / 1000000;
+        timeout->tv_usec %= 1000000;
+    }
     result = real_select(nfds, readfds, writefds, exceptfds, timeout);
     /* rbp's loopback debug console watches descriptors 0..4. Under qemu-user
        one emulated descriptor remains spuriously ready and turns this into a
