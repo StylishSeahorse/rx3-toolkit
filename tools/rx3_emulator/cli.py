@@ -297,8 +297,14 @@ def evaluate(
     if profile != "stock" and media_info.get("mounted"):
         checks.update({
             "native_usb_mounted": "emulator firmware USB1 force mount result = 1" in hook_log,
+            "native_usb_database_attached": "emulator native database attach result = 1" in hook_log,
+            "native_usb_analysis_requested": "emulator legacy USB1 analysis requested" in hook_log,
             "native_usb_source_selected": "emulator native USB1 source key result = 1" in hook_log,
             "native_browse_dispatched": "emulator native BROWSE key result = 1" in hook_log,
+            "native_browse_state_committed": (
+                "emulator native browse device = 3" in hook_log
+                and "emulator native browse mode = 3" in hook_log
+            ),
         })
     report: dict[str, object] = {
         "profile": profile,
@@ -315,10 +321,11 @@ def evaluate(
                 "hook guards",
                 "native UI draw path",
                 *(["firmware USB1 mount and source dispatch"] if checks.get("native_usb_mounted") else []),
+                *(["firmware USB1 database/VFS attach and browser view state"] if checks.get("native_browse_state_committed") else []),
                 *(["virtual touch routing"] if touch_events else []),
             ],
             "not_validated": [
-                "visible USB category/track browser",
+                "populated USB category/track rows",
                 "loaded-track audio",
                 "hardware LEDs",
                 "USB timing",

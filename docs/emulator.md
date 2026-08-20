@@ -103,9 +103,16 @@ the next playback milestone; a plain audio folder is not a Rekordbox library.
 When media is present, the modified profile also reproduces the RX3 kernel's
 queued `/proc/udev_usb1` mount event, calls the genuine
 `UsbMountManager::force_mount` method, and dispatches the native USB1 and
-BROWSE keys on the UI thread. These steps are reported separately. A successful
-dispatch proves firmware-side source routing, but is not yet treated as proof
-that the category/track browser became visible or that a track loaded.
+BROWSE keys on the UI thread. In the reduced PC startup, the hardware-backed
+`UsbStorageManager` is absent, so the emulator bridges the mounted path through
+the genuine `DbProxy::reqAttach` and legacy `DBC_DriveAnalysisStart` entry
+points. It then commits the accepted USB1/category state that the missing R232C
+consumer would normally apply. These steps are reported separately.
+
+This path now reaches the genuine browser view headed `READ ONLY (USB1)` and
+reports browse device 3 / mode 3. Empty rows are not treated as successful
+track enumeration: populated category/track data and track loading remain the
+next milestone.
 
 Un succès du profil modifié exige un framebuffer non vide, le fichier de
 readiness du hook, le message d'activation, la table d'images privée, des

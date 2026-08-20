@@ -55,6 +55,17 @@
 #define USB_FORCE_MOUNT ((unsigned long)0x003201fc)
 #define UI_KEY_USB1 ((unsigned long)0x0011a3cc)
 #define UI_KEY_BROWSE ((unsigned long)0x00119e94)
+#define UI_GET_USB_BROWSER ((unsigned long)0x0031dfa0)
+#define UI_GET_USB_STORAGE_MANAGER ((unsigned long)0x0031dfc8)
+#define USB_BROWSER_SET_NO_CAUTION ((unsigned long)0x0031f1f0)
+#define DB_PROXY_NOTIFY_MEDIA_SELECT ((unsigned long)0x0033c2b0)
+#define DB_PROXY_REQ_ATTACH ((unsigned long)0x0033ba30)
+#define DBC_DRIVE_ANALYSIS_START ((unsigned long)0x001b47ec)
+#define DBC_CURRENT_GUI_STATE ((unsigned long)0x02487390)
+#define GET_BROWSE_MODE ((unsigned long)0x001126d0)
+#define GET_BROWSE_DEVICE ((unsigned long)0x001126e0)
+#define GET_UI_BROWSE_POINTER ((unsigned long)0x001125b8)
+#define SET_BROWSE_MODE ((unsigned long)0x00113ab4)
 /* dsp::TimeStretch::getStreamAt is the deck's playback stream. It wraps
    PcmReader::getStreamAt and is the speed and master-tempo stage, so its output
    is what the deck actually plays. PcmReader::getStreamAt itself is shared with
@@ -189,6 +200,15 @@ typedef void *(*dj_engine_get_instance_fn)(void);
 typedef void (*dj_engine_initialize_audio_fn)(void *, int);
 typedef int (*usb_force_mount_fn)(void *, int, const char *);
 typedef int (*ui_key_usb1_fn)(void *);
+typedef void *(*ui_get_usb_browser_fn)(unsigned int);
+typedef void (*usb_browser_set_no_caution_fn)(void *);
+typedef int (*db_proxy_notify_media_select_fn)(unsigned int, int);
+typedef int (*db_proxy_req_attach_fn)(unsigned int, const char *, int, int,
+                                      int, int);
+typedef void (*dbc_drive_analysis_start_fn)(void *, const void *, int);
+typedef unsigned int (*get_browse_state_fn)(void);
+typedef void *(*get_ui_browse_pointer_fn)(void);
+typedef void (*set_browse_mode_fn)(unsigned int);
 typedef void (*render_cur_pos_fn)(int *, int *);
 typedef void (*set_beatfx_selected_fn)(int);
 typedef int (*get_beatfx_selected_fn)(void);
@@ -319,6 +339,8 @@ static volatile unsigned int emulator_usb_browser_opened;
 static volatile unsigned int emulator_browse_key_pressed;
 static volatile uint64_t emulator_usb_mount_us;
 static volatile uint64_t emulator_usb_key_us;
+static volatile unsigned int emulator_legacy_usb_bridge;
+static unsigned char emulator_usb_drive_info[2160];
 static unsigned int emulator_touch_sequence;
 #endif
 
@@ -1872,6 +1894,8 @@ static void emulator_activate_usb(void)
     static unsigned int applied;
     const char *enabled;
     void *manager;
+    void *storage_manager;
+    void *gui_state;
     int result;
     if (applied)
         return;
@@ -1890,12 +1914,36 @@ static void emulator_activate_usb(void)
     if (result) {
         emulator_usb_mounted = 1u;
         emulator_usb_mount_us = monotonic_enough_us();
+        storage_manager = ((ui_get_usb_browser_fn)
+                           UI_GET_USB_STORAGE_MANAGER)(1u);
+        log_number("emulator native USB storage manager = ",
+                   (unsigned long)storage_manager);
+        if (!storage_manager) {
+            emulator_legacy_usb_bridge = 1u;
+            result = ((db_proxy_req_attach_fn)DB_PROXY_REQ_ATTACH)(
+                1u, "/media/usb1/sda1", 0, 0, 0, 0);
+            log_number("emulator native database attach result = ",
+                       (unsigned long)result);
+            if (result) {
+                gui_state = *(void **)DBC_CURRENT_GUI_STATE;
+                log_number("emulator legacy database state = ",
+                           (unsigned long)gui_state);
+                if (gui_state) {
+                    ((dbc_drive_analysis_start_fn)
+                     DBC_DRIVE_ANALYSIS_START)(
+                        gui_state, emulator_usb_drive_info, 2);
+                    log_line("emulator legacy USB1 analysis requested");
+                }
+            }
+        }
     }
 }
 
 static void emulator_open_usb_browser(void)
 {
     uint32_t key[3] = { 0u, 0u, 0u };
+    void *browser;
+    unsigned int channel;
     int result;
     uint64_t now = monotonic_enough_us();
     if (emulator_usb_browser_opened && !emulator_browse_key_pressed &&
@@ -1905,14 +1953,49 @@ static void emulator_open_usb_browser(void)
         result = ((ui_key_usb1_fn)UI_KEY_BROWSE)(key);
         log_number("emulator native BROWSE key result = ",
                    (unsigned long)result);
+        if (emulator_legacy_usb_bridge) {
+            ((set_browse_mode_fn)SET_BROWSE_MODE)(3u);
+            log_line("emulator committed legacy category browse mode");
+        }
+        log_number("emulator native browse device = ",
+                   (unsigned long)((get_browse_state_fn)
+                   GET_BROWSE_DEVICE)());
+        log_number("emulator native browse mode = ",
+                   (unsigned long)((get_browse_state_fn)
+                   GET_BROWSE_MODE)());
+        browser = ((ui_get_usb_browser_fn)UI_GET_USB_BROWSER)(1u);
+        if (!browser) {
+            log_line("emulator native USB browser object unavailable");
+            return;
+        }
+        channel = *(unsigned int *)((unsigned char *)browser + 0x48u);
+        log_number("emulator native USB browser object = ",
+                   (unsigned long)browser);
+        log_number("emulator native USB browser channel = ",
+                   (unsigned long)channel);
+        ((usb_browser_set_no_caution_fn)USB_BROWSER_SET_NO_CAUTION)(browser);
+        *(unsigned char *)((unsigned char *)browser + 0x4cu) = 1u;
+        result = ((db_proxy_notify_media_select_fn)
+                  DB_PROXY_NOTIFY_MEDIA_SELECT)(channel, 1);
+        log_number("emulator native USB browser active = ",
+                   (unsigned long)*(unsigned char *)
+                   ((unsigned char *)browser + 0x4cu));
+        log_number("emulator native media select result = ",
+                   (unsigned long)result);
         return;
     }
     if (!emulator_usb_mounted || emulator_usb_browser_opened ||
-        now - emulator_usb_mount_us < 2000000u)
+        now - emulator_usb_mount_us < 5000000u)
         return;
     emulator_usb_browser_opened = 1u;
     log_line("emulator pressing native USB1 source key");
     result = ((ui_key_usb1_fn)UI_KEY_USB1)(key);
+    if (emulator_legacy_usb_bridge) {
+        void *browse = ((get_ui_browse_pointer_fn)
+                        GET_UI_BROWSE_POINTER)();
+        *(unsigned int *)((unsigned char *)browse + 4u) = 3u;
+        log_line("emulator committed legacy USB1 browse device");
+    }
     emulator_usb_key_us = monotonic_enough_us();
     log_number("emulator native USB1 source key result = ",
                (unsigned long)result);
