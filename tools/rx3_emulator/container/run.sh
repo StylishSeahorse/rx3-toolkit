@@ -26,9 +26,11 @@ printf 'Processor\t: ARMv7 Processor rev 10 (v7l)\nRevision\t: 00000700\n' \
     > /work/rx3-cpuinfo
 mount --bind /work/rx3-cpuinfo /rx3/proc/cpuinfo
 mount --rbind /dev /rx3/dev
+USB1=0
 if [ -n "$MEDIA" ]; then
-    mkdir -p /rx3/media/usb1
-    mount --bind "$MEDIA" /rx3/media/usb1
+    USB1=1
+    mkdir -p /rx3/media/usb1/sda1
+    mount --bind "$MEDIA" /rx3/media/usb1/sda1
 fi
 
 # rbp and its fixed-path assets live in a private copy. The laboratory sysroot
@@ -132,6 +134,7 @@ chroot /rx3 /bin/sh -c \
      LD_PRELOAD='$PRELOAD' RX3_KEYSHIFT='$KEYSHIFT' RX3_STEMS_DIR='$STEMS' \
      RX3_EMULATOR_PANEL='$PANEL' \
      RX3_EMULATOR_AUDIO='1' \
+     RX3_EMULATOR_USB1='$USB1' \
      RX3EMU_OUTPUT=/tmp/rx3emu \
      DFBARGS='system=fbdev,no-vt,no-sighandler,no-cursor,no-hardware,disable-module=keyboard,disable-module=linux_input,disable-module=gal,mode=1280x720,depth=32' \
      ./rbp -a < /tmp/stdin.fifo" > "$OUT/rbp.log" 2>&1 &

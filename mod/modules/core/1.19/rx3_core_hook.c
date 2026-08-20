@@ -51,6 +51,10 @@
 #define DJ_ENGINE_GET_INSTANCE ((unsigned long)0x00028408)
 #define DJ_ENGINE_INITIALIZE_AUDIO ((unsigned long)0x00044c24)
 #define GET_CPU_REVISION ((unsigned long)0x003c30c8)
+#define USB_MOUNT_MANAGER_SINGLETON ((unsigned long)0x02686810)
+#define USB_FORCE_MOUNT ((unsigned long)0x003201fc)
+#define UI_KEY_USB1 ((unsigned long)0x0011a3cc)
+#define UI_KEY_BROWSE ((unsigned long)0x00119e94)
 /* dsp::TimeStretch::getStreamAt is the deck's playback stream. It wraps
    PcmReader::getStreamAt and is the speed and master-tempo stage, so its output
    is what the deck actually plays. PcmReader::getStreamAt itself is shared with
@@ -183,6 +187,8 @@ typedef int (*audio_buffer_size_fn)(void *);
 typedef double (*audio_sample_rate_fn)(void *);
 typedef void *(*dj_engine_get_instance_fn)(void);
 typedef void (*dj_engine_initialize_audio_fn)(void *, int);
+typedef int (*usb_force_mount_fn)(void *, int, const char *);
+typedef int (*ui_key_usb1_fn)(void *);
 typedef void (*render_cur_pos_fn)(int *, int *);
 typedef void (*set_beatfx_selected_fn)(int);
 typedef int (*get_beatfx_selected_fn)(void);
@@ -308,6 +314,11 @@ static volatile unsigned int beatfx_reselect_pending;
 static volatile unsigned int emulator_forced_panel;
 static volatile unsigned int emulator_panel_applied;
 static volatile unsigned int emulator_audio_applied;
+static volatile unsigned int emulator_usb_mounted;
+static volatile unsigned int emulator_usb_browser_opened;
+static volatile unsigned int emulator_browse_key_pressed;
+static volatile uint64_t emulator_usb_mount_us;
+static volatile uint64_t emulator_usb_key_us;
 static unsigned int emulator_touch_sequence;
 #endif
 
@@ -317,6 +328,8 @@ static int deck_index_for_reader(const void *reader);
 static void emulator_poll_touch(void);
 static void emulator_activate_initial_panel(void);
 static void emulator_activate_audio(void);
+static void emulator_activate_usb(void);
+static void emulator_open_usb_browser(void);
 static int emulator_get_cpu_revision(void);
 #endif
 
@@ -639,6 +652,7 @@ static void *watch_patch_state(void *unused)
 #endif
 #if defined(RX3_EMULATOR_BUILD)
         emulator_activate_initial_panel();
+        emulator_activate_usb();
         emulator_activate_audio();
 #endif
         /* Nothing else invalidates the pad windows while a sidecar is read, so
@@ -1271,6 +1285,9 @@ static void draw_custom_pad_half(void *render, const void *model,
 static void hooked_draw_image(void *render, void *image)
 {
     image_draw_calls++;
+#if defined(RX3_EMULATOR_BUILD)
+    emulator_open_usb_browser();
+#endif
     if (RX3_DIAGNOSTIC_ONLY) {
         original_draw_image(render, image);
         return;
@@ -1848,6 +1865,57 @@ static void emulator_activate_audio(void)
     log_line("emulator starting native audio device");
     initialize_audio(engine, 0);
     log_line("emulator native audio initialization returned");
+}
+
+static void emulator_activate_usb(void)
+{
+    static unsigned int applied;
+    const char *enabled;
+    void *manager;
+    int result;
+    if (applied)
+        return;
+    enabled = getenv("RX3_EMULATOR_USB1");
+    if (!enabled || enabled[0] != '1')
+        return;
+    manager = *(void **)USB_MOUNT_MANAGER_SINGLETON;
+    if (!manager)
+        return;
+    applied = 1u;
+    log_line("emulator requesting firmware USB1 force mount");
+    result = ((usb_force_mount_fn)USB_FORCE_MOUNT)(
+        manager, 1, "/media/usb1/sda1");
+    log_number("emulator firmware USB1 force mount result = ",
+               (unsigned long)result);
+    if (result) {
+        emulator_usb_mounted = 1u;
+        emulator_usb_mount_us = monotonic_enough_us();
+    }
+}
+
+static void emulator_open_usb_browser(void)
+{
+    uint32_t key[3] = { 0u, 0u, 0u };
+    int result;
+    uint64_t now = monotonic_enough_us();
+    if (emulator_usb_browser_opened && !emulator_browse_key_pressed &&
+        now - emulator_usb_key_us >= 1000000u) {
+        emulator_browse_key_pressed = 1u;
+        log_line("emulator pressing native BROWSE key");
+        result = ((ui_key_usb1_fn)UI_KEY_BROWSE)(key);
+        log_number("emulator native BROWSE key result = ",
+                   (unsigned long)result);
+        return;
+    }
+    if (!emulator_usb_mounted || emulator_usb_browser_opened ||
+        now - emulator_usb_mount_us < 2000000u)
+        return;
+    emulator_usb_browser_opened = 1u;
+    log_line("emulator pressing native USB1 source key");
+    result = ((ui_key_usb1_fn)UI_KEY_USB1)(key);
+    emulator_usb_key_us = monotonic_enough_us();
+    log_number("emulator native USB1 source key result = ",
+               (unsigned long)result);
 }
 
 static int emulator_get_cpu_revision(void)

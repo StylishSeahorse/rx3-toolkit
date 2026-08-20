@@ -32,14 +32,14 @@ struct fake_device {
 };
 
 static const struct fake_device fake_devices[] = {
-    { "/proc/udev_usb1", 0, "0\n" },
+    { "/proc/udev_usb1", 1, NULL },
     { "/dev/snd/seq", 1, NULL },
     { "/dev/aloadSEQ", 1, NULL },
     { "/proc/udev_usbctn1", 0, "0\n" },
     { "/proc/udev_usbctn2", 0, "0\n" },
     { "/sys/devices/platform/pwm-backlight.1/backlight/pwm-backlight.1/max_brightness", 0, "255\n" },
     { "/sys/devices/platform/pwm-backlight.1/backlight/pwm-backlight.1/brightness", 0, "180\n" },
-    { "/proc/udev_usb2", 0, "0\n" },
+    { "/proc/udev_usb2", 1, NULL },
     { "/sys/class/paudiog/paudiog0/connect", 0, "0\n" },
     { "/dev/gpiodrv", 0, NULL },
     { "/dev/hidg0", 1, NULL },
@@ -485,6 +485,7 @@ static int open_fake(const struct fake_device *device)
 {
     char path[320];
     const char *base = strrchr(device->path, '/');
+    const char *initial = device->initial;
     int descriptor;
     int fresh;
     base = base ? base + 1 : device->path;
@@ -496,10 +497,17 @@ static int open_fake(const struct fake_device *device)
     } else {
         fresh = access(path, F_OK) != 0;
         descriptor = real_open(path, O_RDWR | O_CREAT, 0666);
-        if (descriptor >= 0 && fresh && device->initial) {
-            real_write(descriptor, device->initial, strlen(device->initial));
+        if (descriptor >= 0 && fresh && initial) {
+            real_write(descriptor, initial, strlen(initial));
             lseek(descriptor, 0, SEEK_SET);
         }
+    }
+    if (descriptor >= 0 && !strcmp(device->path, "/proc/udev_usb1") &&
+        getenv("RX3_EMULATOR_USB1") &&
+        !strcmp(getenv("RX3_EMULATOR_USB1"), "1")) {
+        static const char event[] = "mount /media/usb1/sda1";
+        real_write(descriptor, event, sizeof(event) - 1);
+        log_hardware("usb-event", event, descriptor);
     }
     remember_fake(descriptor, device->path);
     return descriptor;
@@ -529,6 +537,8 @@ static int redirected_open(const char *path, int flags, mode_t mode, int use_ope
     }
     descriptor = use_open64 && real_open64
         ? real_open64(path, flags, mode) : real_open(path, flags, mode);
+    if (path && !strncmp(path, "/media/", 7))
+        log_hardware("open-media", path, descriptor);
     if (path && (!strncmp(path, "/dev/", 5) ||
                  !strncmp(path, "/proc/", 6) ||
                  !strncmp(path, "/sys/", 5)))

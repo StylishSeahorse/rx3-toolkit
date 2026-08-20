@@ -294,6 +294,12 @@ def evaluate(
         "native_audio_started": profile == "stock" or "probe audio-start calls = 1" in hook_log,
         "pcm_audio_exported": profile == "stock" or bool(audio_buses),
     }
+    if profile != "stock" and media_info.get("mounted"):
+        checks.update({
+            "native_usb_mounted": "emulator firmware USB1 force mount result = 1" in hook_log,
+            "native_usb_source_selected": "emulator native USB1 source key result = 1" in hook_log,
+            "native_browse_dispatched": "emulator native BROWSE key result = 1" in hook_log,
+        })
     report: dict[str, object] = {
         "profile": profile,
         **provenance,
@@ -308,9 +314,16 @@ def evaluate(
                 "DirectFB rendering",
                 "hook guards",
                 "native UI draw path",
+                *(["firmware USB1 mount and source dispatch"] if checks.get("native_usb_mounted") else []),
                 *(["virtual touch routing"] if touch_events else []),
             ],
-            "not_validated": ["loaded-track audio", "hardware LEDs", "USB timing", "device stability"],
+            "not_validated": [
+                "visible USB category/track browser",
+                "loaded-track audio",
+                "hardware LEDs",
+                "USB timing",
+                "device stability",
+            ],
         },
     }
     (output / "report.json").write_text(

@@ -95,10 +95,17 @@ To run against a real Rekordbox-exported USB folder, pass its root directory:
 python3 -m tools.rx3_emulator.cli --profile all --media /path/to/USB --duration 120
 ```
 
-The runner presents that folder at the firmware's native `/media/usb1` path
+The runner presents that folder at the firmware's native `/media/usb1/sda1` path
 and writes `media.json` with the detected `PIONEER/rekordbox/export.pdb`,
 `exportExt.pdb`, and `PIONEER/LIBRARY/PDTL.DB` files. This is the bridge for
 the next playback milestone; a plain audio folder is not a Rekordbox library.
+
+When media is present, the modified profile also reproduces the RX3 kernel's
+queued `/proc/udev_usb1` mount event, calls the genuine
+`UsbMountManager::force_mount` method, and dispatches the native USB1 and
+BROWSE keys on the UI thread. These steps are reported separately. A successful
+dispatch proves firmware-side source routing, but is not yet treated as proof
+that the category/track browser became visible or that a track loaded.
 
 Un succès du profil modifié exige un framebuffer non vide, le fichier de
 readiness du hook, le message d'activation, la table d'images privée, des
