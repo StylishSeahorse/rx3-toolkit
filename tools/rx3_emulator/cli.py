@@ -298,6 +298,9 @@ def evaluate(
         checks.update({
             "native_usb_mounted": "emulator firmware USB1 force mount result = 1" in hook_log,
             "native_usb_database_attached": "emulator native database attach result = 1" in hook_log,
+            "native_usb_export_database_opened": bool(re.search(
+                r"emulator firmware export\.pdb open = [1-9][0-9]*", hook_log
+            )),
             "native_usb_analysis_requested": "emulator legacy USB1 analysis requested" in hook_log,
             "native_usb_source_selected": "emulator native USB1 source key result = 1" in hook_log,
             "native_browse_dispatched": "emulator native BROWSE key result = 1" in hook_log,
@@ -321,6 +324,7 @@ def evaluate(
                 "hook guards",
                 "native UI draw path",
                 *(["firmware USB1 mount and source dispatch"] if checks.get("native_usb_mounted") else []),
+                *(["firmware-native export.pdb access"] if checks.get("native_usb_export_database_opened") else []),
                 *(["firmware USB1 database/VFS attach and browser view state"] if checks.get("native_browse_state_committed") else []),
                 *(["virtual touch routing"] if touch_events else []),
             ],

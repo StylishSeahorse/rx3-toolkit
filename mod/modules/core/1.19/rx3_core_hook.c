@@ -59,9 +59,13 @@
 #define UI_GET_USB_STORAGE_MANAGER ((unsigned long)0x0031dfc8)
 #define USB_BROWSER_SET_NO_CAUTION ((unsigned long)0x0031f1f0)
 #define DB_PROXY_NOTIFY_MEDIA_SELECT ((unsigned long)0x0033c2b0)
-#define DB_PROXY_REQ_ATTACH ((unsigned long)0x0033ba30)
 #define DBC_DRIVE_ANALYSIS_START ((unsigned long)0x001b47ec)
 #define DBC_CURRENT_GUI_STATE ((unsigned long)0x02487390)
+#define DJRFOPEN_ASCII ((unsigned long)0x0015ae0c)
+#define VFS_FCLOSE ((unsigned long)0x0019641c)
+#define VFS_GET_MOUNT_POINT ((unsigned long)0x00197324)
+#define VFS_GETFSYS ((unsigned long)0x00197640)
+#define VFS_SETFSYS ((unsigned long)0x0019775c)
 #define GET_BROWSE_MODE ((unsigned long)0x001126d0)
 #define GET_BROWSE_DEVICE ((unsigned long)0x001126e0)
 #define GET_UI_BROWSE_POINTER ((unsigned long)0x001125b8)
@@ -203,9 +207,12 @@ typedef int (*ui_key_usb1_fn)(void *);
 typedef void *(*ui_get_usb_browser_fn)(unsigned int);
 typedef void (*usb_browser_set_no_caution_fn)(void *);
 typedef int (*db_proxy_notify_media_select_fn)(unsigned int, int);
-typedef int (*db_proxy_req_attach_fn)(unsigned int, const char *, int, int,
-                                      int, int);
 typedef void (*dbc_drive_analysis_start_fn)(void *, const void *, int);
+typedef void *(*djrfopen_ascii_fn)(const char *);
+typedef int (*vfs_fclose_fn)(void *);
+typedef const char *(*vfs_get_mount_point_fn)(int);
+typedef int (*vfs_getfsys_fn)(const char *);
+typedef void (*vfs_setfsys_fn)(int, int, const char *, int);
 typedef unsigned int (*get_browse_state_fn)(void);
 typedef void *(*get_ui_browse_pointer_fn)(void);
 typedef void (*set_browse_mode_fn)(unsigned int);
@@ -1896,6 +1903,9 @@ static void emulator_activate_usb(void)
     void *manager;
     void *storage_manager;
     void *gui_state;
+    void *database_file;
+    const char *mount_point;
+    int file_system;
     int result;
     if (applied)
         return;
@@ -1920,11 +1930,29 @@ static void emulator_activate_usb(void)
                    (unsigned long)storage_manager);
         if (!storage_manager) {
             emulator_legacy_usb_bridge = 1u;
-            result = ((db_proxy_req_attach_fn)DB_PROXY_REQ_ATTACH)(
-                1u, "/media/usb1/sda1", 0, 0, 0, 0);
+            file_system = ((vfs_getfsys_fn)VFS_GETFSYS)(
+                "/media/usb1/sda1");
+            ((vfs_setfsys_fn)VFS_SETFSYS)(
+                'B', file_system, "/media/usb1/sda1", 0);
+            result = ((vfs_get_mount_point_fn)
+                      VFS_GET_MOUNT_POINT)('B') != 0;
             log_number("emulator native database attach result = ",
                        (unsigned long)result);
+            log_number("emulator firmware USB1 filesystem = ",
+                       (unsigned long)file_system);
             if (result) {
+                mount_point = ((vfs_get_mount_point_fn)
+                               VFS_GET_MOUNT_POINT)('B');
+                log_number("emulator firmware VFS B mount point = ",
+                           (unsigned long)mount_point);
+                if (mount_point)
+                    log_line(mount_point);
+                database_file = ((djrfopen_ascii_fn)DJRFOPEN_ASCII)(
+                    "B:/PIONEER/rekordbox/export.pdb");
+                log_number("emulator firmware export.pdb open = ",
+                           (unsigned long)database_file);
+                if (database_file)
+                    ((vfs_fclose_fn)VFS_FCLOSE)(database_file);
                 gui_state = *(void **)DBC_CURRENT_GUI_STATE;
                 log_number("emulator legacy database state = ",
                            (unsigned long)gui_state);
@@ -1954,6 +1982,9 @@ static void emulator_open_usb_browser(void)
         log_number("emulator native BROWSE key result = ",
                    (unsigned long)result);
         if (emulator_legacy_usb_bridge) {
+            void *browse = ((get_ui_browse_pointer_fn)
+                            GET_UI_BROWSE_POINTER)();
+            *(unsigned int *)((unsigned char *)browse + 4u) = 3u;
             ((set_browse_mode_fn)SET_BROWSE_MODE)(3u);
             log_line("emulator committed legacy category browse mode");
         }

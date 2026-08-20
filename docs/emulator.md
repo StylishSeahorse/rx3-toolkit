@@ -105,9 +105,12 @@ queued `/proc/udev_usb1` mount event, calls the genuine
 `UsbMountManager::force_mount` method, and dispatches the native USB1 and
 BROWSE keys on the UI thread. In the reduced PC startup, the hardware-backed
 `UsbStorageManager` is absent, so the emulator bridges the mounted path through
-the genuine `DbProxy::reqAttach` and legacy `DBC_DriveAnalysisStart` entry
-points. It then commits the accepted USB1/category state that the missing R232C
-consumer would normally apply. These steps are reported separately.
+the firmware VFS and legacy `DBC_DriveAnalysisStart` entry point. Calling the
+modern `DbProxy` here is unsafe because its asynchronous completion expects the
+missing storage manager. The runner verifies the VFS bridge by opening
+`B:/PIONEER/rekordbox/export.pdb` through the firmware's own database wrapper,
+then commits the USB1/category state that the missing R232C consumer would
+normally apply. These steps are reported separately.
 
 This path now reaches the genuine browser view headed `READ ONLY (USB1)` and
 reports browse device 3 / mode 3. Empty rows are not treated as successful
