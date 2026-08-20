@@ -55,6 +55,13 @@
 #define USB_FORCE_MOUNT ((unsigned long)0x003201fc)
 #define UI_KEY_USB1 ((unsigned long)0x0011a3cc)
 #define UI_KEY_BROWSE ((unsigned long)0x00119e94)
+#define UI_KEY_BACK ((unsigned long)0x0011dc24)
+#define UI_KEY_ENCODER_PUSH ((unsigned long)0x0011fe00)
+#define UI_KEY_ENCODER_ROTATE ((unsigned long)0x00121084)
+#define UI_KEY_LOAD1 ((unsigned long)0x0011d8b4)
+#define UI_KEY_LOAD2 ((unsigned long)0x0011d73c)
+#define UI_KEY_TAG_LIST ((unsigned long)0x0011da28)
+#define UI_KEY_MENU ((unsigned long)0x001194d0)
 #define UI_GET_USB_BROWSER ((unsigned long)0x0031dfa0)
 #define UI_GET_USB_STORAGE_MANAGER ((unsigned long)0x0031dfc8)
 #define USB_BROWSER_SET_NO_CAUTION ((unsigned long)0x0031f1f0)
@@ -204,6 +211,7 @@ typedef void *(*dj_engine_get_instance_fn)(void);
 typedef void (*dj_engine_initialize_audio_fn)(void *, int);
 typedef int (*usb_force_mount_fn)(void *, int, const char *);
 typedef int (*ui_key_usb1_fn)(void *);
+typedef int (*ui_key_encoder_rotate_fn)(int);
 typedef void *(*ui_get_usb_browser_fn)(unsigned int);
 typedef void (*usb_browser_set_no_caution_fn)(void *);
 typedef int (*db_proxy_notify_media_select_fn)(unsigned int, int);
@@ -1782,9 +1790,44 @@ static int emulator_parse_coordinate(const char **cursor, int *value)
     return digits != 0;
 }
 
+static void emulator_apply_button(int control)
+{
+    uint32_t key[3] = { 0u, 0u, 0u };
+    unsigned long handler = 0u;
+    int result;
+    switch (control) {
+    case 1: handler = UI_KEY_USB1; break;
+    case 2: handler = UI_KEY_BROWSE; break;
+    case 3: handler = UI_KEY_BACK; break;
+    case 4:
+        result = ((ui_key_encoder_rotate_fn)UI_KEY_ENCODER_ROTATE)(-1);
+        log_number("emulator button encoder up result = ",
+                   (unsigned long)result);
+        return;
+    case 5:
+        result = ((ui_key_encoder_rotate_fn)UI_KEY_ENCODER_ROTATE)(1);
+        log_number("emulator button encoder down result = ",
+                   (unsigned long)result);
+        return;
+    case 6: handler = UI_KEY_ENCODER_PUSH; break;
+    case 7: handler = UI_KEY_LOAD1; break;
+    case 8: handler = UI_KEY_LOAD2; break;
+    case 9: handler = UI_KEY_TAG_LIST; break;
+    case 10: handler = UI_KEY_MENU; break;
+    default: return;
+    }
+    result = ((ui_key_usb1_fn)handler)(key);
+    log_number("emulator button control = ", (unsigned long)control);
+    log_number("emulator button result = ", (unsigned long)result);
+}
+
 static void emulator_apply_touch(int x, int y)
 {
     const struct rx3_panel_feature *panel;
+    if (x == 2000) {
+        emulator_apply_button(y);
+        return;
+    }
     if (x < 0 || x >= 1280 || y < 0 || y >= 720)
         return;
 

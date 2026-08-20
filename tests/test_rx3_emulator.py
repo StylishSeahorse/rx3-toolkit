@@ -5,6 +5,7 @@ import pathlib
 import struct
 import tempfile
 import unittest
+from unittest import mock
 import wave
 
 from tools.rx3_emulator.framebuffer import (
@@ -13,7 +14,8 @@ from tools.rx3_emulator.framebuffer import (
     export_png,
     read_metadata,
 )
-from tools.rx3_emulator.cli import docker_command
+from tools.rx3_emulator import cli as emulator_cli
+from tools.rx3_emulator.cli import VIRTUAL_BUTTONS, docker_command
 from tools.rx3_emulator.audio import export_wav
 
 
@@ -76,6 +78,20 @@ class FramebufferTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_virtual_buttons_have_stable_unique_control_ids(self) -> None:
+        controls = dict(VIRTUAL_BUTTONS)
+        self.assertEqual(controls["USB1"], 1)
+        self.assertEqual(controls["SELECT"], 6)
+        self.assertEqual(controls["LOAD 2"], 8)
+        self.assertEqual(len(set(controls.values())), len(controls))
+
+    def test_virtual_button_uses_reserved_touch_channel(self) -> None:
+        with mock.patch.object(emulator_cli, "inject_touch") as inject:
+            emulator_cli.inject_button("rx3-test", pathlib.Path("output"), 6)
+        inject.assert_called_once_with(
+            "rx3-test", pathlib.Path("output"), 2000, 6
+        )
+
     def test_container_is_named_for_touch_injection(self) -> None:
         command = docker_command(
             pathlib.Path("/private/sysroot"),

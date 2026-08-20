@@ -19,7 +19,9 @@ Cet outil exécute le véritable binaire ARM `rbp` et les bibliothèques du
 firmware 1.19 dans Docker/QEMU. Un shim remplace `fbdev` et les périphériques
 indispensables au démarrage, puis exporte le framebuffer DirectFB en PNG. La
 commande principale ouvre aussi une fenêtre 1280×720 : un clic y est routé
-vers les onglets et les contrôles du broker KEY/STEMS.
+vers les onglets et les contrôles du broker KEY/STEMS, et une barre de boutons
+pilote les gestionnaires natifs USB1, BROWSE, BACK, encodeur, LOAD, TAG LIST et
+MENU du firmware.
 
 Deux niveaux complémentaires sont disponibles :
 
@@ -47,9 +49,10 @@ les gardes des hooks, le démarrage de `rbp`, le chemin de rendu natif et le
 routage tactile des mods et le démarrage des bus PCM. Il ne valide pas encore
 le DSP d'un morceau chargé, les LEDs, les microcontrôleurs de façade, les accès
 USB réels ni la stabilité sur appareil.
-Les contrôles stock hors du panneau Performance ne sont pas encore routés :
-l'initialisation du vrai `TouchPanel` reste bloquée par des périphériques
-absents sous QEMU.
+Le `TouchPanel` stock complet reste bloqué par des périphériques absents sous
+QEMU. Les commandes matérielles essentielles au navigateur passent donc par
+une barre virtuelle dédiée et appellent directement leurs gestionnaires
+firmware, sans simuler des coordonnées tactiles stock.
 
 ## Prérequis
 
@@ -71,8 +74,10 @@ make emulate
 ```
 
 La commande teste le profil `all` pendant 60 secondes. Les résultats sont dans
-`outputs/rx3-emulator/<date>/`. Cliquez dans l'écran pour piloter KEY/STEMS ;
-Échap ou `q` ferme la session. Les artefacts comprennent :
+`outputs/rx3-emulator/<date>/`. Cliquez dans l'écran pour piloter KEY/STEMS ou
+utilisez la barre de boutons pour le navigateur. Les flèches haut/bas, Entrée,
+Retour arrière et les touches `1`/`2` correspondent aussi à l'encodeur, BACK et
+LOAD 1/2. Échap ou `q` ferme la session. Les artefacts comprennent :
 
 - `framebuffer.png` : dernière image 1280×720 ;
 - `audio-playback-0.wav` à `audio-playback-2.wav` : les trois bus de sortie

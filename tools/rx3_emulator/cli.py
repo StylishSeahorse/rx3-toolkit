@@ -28,6 +28,18 @@ SUPPORTED_RBP_SHA1 = {
     "be05066245d857c654d297e40a5f6545dcfb3da4",
 }
 TOUCH_SEQUENCE = 0
+VIRTUAL_BUTTONS = (
+    ("USB1", 1),
+    ("BROWSE", 2),
+    ("BACK", 3),
+    ("UP", 4),
+    ("DOWN", 5),
+    ("SELECT", 6),
+    ("LOAD 1", 7),
+    ("LOAD 2", 8),
+    ("TAG LIST", 9),
+    ("MENU", 10),
+)
 
 
 def digest(path: pathlib.Path, algorithm: str = "sha1") -> str:
@@ -165,6 +177,12 @@ def inject_touch(container_name: str, output: pathlib.Path, x: int, y: int) -> N
     )
 
 
+def inject_button(
+    container_name: str, output: pathlib.Path, control: int
+) -> None:
+    inject_touch(container_name, output, 2000, control)
+
+
 def monitor(
     process: subprocess.Popen[bytes], output: pathlib.Path
 ) -> dict[str, int | str] | None:
@@ -192,6 +210,8 @@ def monitor_window(
     root.configure(background="#111111")
     image_label = tk.Label(root, borderwidth=0, highlightthickness=0, background="#000000")
     image_label.pack()
+    button_bar = tk.Frame(root, background="#151515", padx=6, pady=6)
+    button_bar.pack(fill="x")
     status = tk.StringVar(value="Démarrage de rbp…")
     tk.Label(
         root,
@@ -223,6 +243,27 @@ def monitor_window(
         except (OSError, subprocess.SubprocessError) as error:
             status.set(f"Tactile indisponible : {error}")
 
+    def press_button(control: int, label: str) -> None:
+        try:
+            inject_button(container_name, output, control)
+            status.set(f"Bouton RX3 : {label}")
+        except (OSError, subprocess.SubprocessError) as error:
+            status.set(f"Bouton indisponible : {error}")
+
+    for label, control in VIRTUAL_BUTTONS:
+        tk.Button(
+            button_bar,
+            text=label,
+            command=lambda selected=control, name=label: press_button(selected, name),
+            foreground="#f5f5f5",
+            background="#303030",
+            activeforeground="#ffffff",
+            activebackground="#555555",
+            relief="raised",
+            padx=9,
+            pady=4,
+        ).pack(side="left", padx=2)
+
     def refresh() -> None:
         if process.poll() is not None:
             root.destroy()
@@ -240,6 +281,12 @@ def monitor_window(
     image_label.bind("<Button-1>", click)
     root.bind("<Escape>", lambda _event: close())
     root.bind("q", lambda _event: close())
+    root.bind("<Up>", lambda _event: press_button(4, "UP"))
+    root.bind("<Down>", lambda _event: press_button(5, "DOWN"))
+    root.bind("<Return>", lambda _event: press_button(6, "SELECT"))
+    root.bind("<BackSpace>", lambda _event: press_button(3, "BACK"))
+    root.bind("1", lambda _event: press_button(7, "LOAD 1"))
+    root.bind("2", lambda _event: press_button(8, "LOAD 2"))
     root.protocol("WM_DELETE_WINDOW", close)
     root.after(0, refresh)
     root.mainloop()
@@ -270,6 +317,10 @@ def evaluate(
     except (OSError, json.JSONDecodeError):
         media_info = {"mounted": False}
     touch_events = hook_log.count("emulator touch control = ")
+    button_events = (
+        hook_log.count("emulator button control = ")
+        + hook_log.count("emulator button encoder ")
+    )
 
     def counter(label: str) -> int:
         match = re.search(rf"^{re.escape(label)}\s*=\s*(\d+)$", hook_log, re.MULTILINE)
@@ -314,6 +365,7 @@ def evaluate(
         **provenance,
         "checks": checks,
         "virtual_touch_events": touch_events,
+        "virtual_button_events": button_events,
         "framebuffer": framebuffer,
         "audio_buses": audio_buses or [],
         "media": media_info,
@@ -327,6 +379,7 @@ def evaluate(
                 *(["firmware-native export.pdb access"] if checks.get("native_usb_export_database_opened") else []),
                 *(["firmware USB1 database/VFS attach and browser view state"] if checks.get("native_browse_state_committed") else []),
                 *(["virtual touch routing"] if touch_events else []),
+                *(["virtual firmware-button routing"] if button_events else []),
             ],
             "not_validated": [
                 "populated USB category/track rows",
@@ -351,7 +404,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sysroot", type=pathlib.Path, default=DEFAULT_SYSROOT)
     parser.add_argument("--output", type=pathlib.Path)
     parser.add_argument("--duration", type=int, default=60)
-    parser.add_argument("--window", action="store_true", help="show a live clickable 1280x720 screen")
+    parser.add_argument(
+        "--window", action="store_true",
+        help="show the live 1280x720 screen and virtual RX3 button bar",
+    )
     parser.add_argument("--rebuild-image", action="store_true")
     parser.add_argument(
         "--trace-syscalls", action="store_true",
